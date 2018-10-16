@@ -1326,3 +1326,121 @@ func stringToNodeID(l lex) (uint64, *ParseError) {
 	}
 	return u, nil
 }
+
+type parserFunc struct {
+	// Func defines the function that parses the tokens and returns the RR
+	// or an error. The last string contains any comments in the line as
+	// they returned by the lexer as well.
+	Func func(h RR_Header, c *zlexer, origin string, file string) (RR, *ParseError, string)
+	// Signals if the RR ending is of variable length, like TXT or records
+	// that have Hexadecimal or Base64 as their last element in the Rdata. Records
+	// that have a fixed ending or for instance A, AAAA, SOA and etc.
+	Variable bool
+}
+
+// Parse the rdata of each rrtype.
+// All data from the channel c is either zString or zBlank.
+// After the rdata there may come a zBlank and then a zNewline
+// or immediately a zNewline. If this is not the case we flag
+// an *ParseError: garbage after rdata.
+func setRR(h RR_Header, c *zlexer, o, f string) (RR, *ParseError, string) {
+	parserfunc, ok := typeToparserFunc[h.Rrtype]
+	if ok {
+		r, e, cm := parserfunc.Func(h, c, o, f)
+		if parserfunc.Variable {
+			return r, e, cm
+		}
+		if e != nil {
+			return nil, e, ""
+		}
+		e, cm = slurpRemainder(c, f)
+		if e != nil {
+			return nil, e, ""
+		}
+		return r, nil, cm
+	}
+	// RFC3957 RR (Unknown RR handling)
+	return setRFC3597(h, c, o, f)
+}
+
+// A remainder of the rdata with embedded spaces, return the parsed string (sans the spaces)
+// or an error
+func endingToString(c *zlexer, errstr, f string) (string, *ParseError, string) {
+	s := ""
+	l, _ := c.Next() // zString
+	for l.value != zNewline && l.value != zEOF {
+		if l.err {
+			return s, &ParseError{f, errstr, l}, ""
+		}
+		switch l.value {
+		case zString:
+			s += l.token
+		case zBlank: // Ok
+		default:
+			return "", &ParseError{f, errstr, l}, ""
+		}
+		l, _ = c.Next()
+	}
+	return s, nil, l.comment
+}
+
+// A remainder of the rdata with embedded spaces, split on unquoted whitespace
+// and return the parsed string slice or an error
+func endingToTxtSlice(c *zlexer, errstr, f string) ([]string, *ParseError, string) {
+	// Get the remaining data until we see a zNewline
+	l, _ := c.Next()
+	if l.err {
+		return nil, &ParseError{f, errstr, l}, ""
+	}
+
+	// Build the slice
+	s := make([]string, 0)
+	quote := false
+	empty := false
+	for l.value != zNewline && l.value != zEOF {
+		if l.err {
+			return nil, &ParseError{f, errstr, l}, ""
+		}
+		switch l.value {
+		case zString:
+			empty = false
+			if len(l.token) > 255 {
+				// split up tokens that are larger than 255 into 255-chunks
+				sx := []string{}
+				p, i := 0, 255
+				for {
+					if i <= len(l.token) {
+						sx = append(sx, l.token[p:i])
+					} else {
+						sx = append(sx, l.token[p:])
+						break
+
+					}
+					p, i = p+255, i+255
+				}
+				s = append(s, sx...)
+				break
+			}
+
+			s = append(s, l.token)
+		case zBlank:
+			if quote {
+				// zBlank can only be seen in between txt parts.
+				return nil, &ParseError{f, errstr, l}, ""
+			}
+		case zQuote:
+			if empty && quote {
+				s = append(s, "")
+			}
+			quote = !quote
+			empty = true
+		default:
+			return nil, &ParseError{f, errstr, l}, ""
+		}
+		l, _ = c.Next()
+	}
+	if quote {
+		return nil, &ParseError{f, errstr, l}, ""
+	}
+	return s, nil, l.comment
+}
