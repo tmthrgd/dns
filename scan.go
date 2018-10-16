@@ -1,5 +1,7 @@
 package dns
 
+//go:generate go run scan_generate.go
+
 import (
 	"bufio"
 	"fmt"
@@ -1311,20 +1313,20 @@ func slurpRemainder(c *zlexer, f string) (*ParseError, string) {
 
 // Parse a 64 bit-like ipv6 address: "0014:4fff:ff20:ee64"
 // Used for NID and L64 record.
-func stringToNodeID(l lex) (uint64, *ParseError) {
+func stringToNodeID(l lex) (uint64, bool) {
 	if len(l.token) < 19 {
-		return 0, &ParseError{l.token, "bad NID/L64 NodeID/Locator64", l}
+		return 0, false
 	}
 	// There must be three colons at fixes postitions, if not its a parse error
 	if l.token[4] != ':' && l.token[9] != ':' && l.token[14] != ':' {
-		return 0, &ParseError{l.token, "bad NID/L64 NodeID/Locator64", l}
+		return 0, false
 	}
 	s := l.token[0:4] + l.token[5:9] + l.token[10:14] + l.token[15:19]
 	u, err := strconv.ParseUint(s, 16, 64)
 	if err != nil {
-		return 0, &ParseError{l.token, "bad NID/L64 NodeID/Locator64", l}
+		return 0, false
 	}
-	return u, nil
+	return u, true
 }
 
 type parserFunc struct {
